@@ -19,10 +19,13 @@ class Server(object):
     for websocket and long-polling transports.
 
     :param async_mode: The library used for asynchronous operations. Valid
-                       options are "threading", "eventlet" and "gevent". If
-                       this argument is not given, "eventlet" is tried first,
-                       then "gevent", and finally "threading". The websocket
-                       transport is only supported in "eventlet" mode.
+                       options are "threading", "eventlet", "gevent" and
+                       "gevent_uwsgi". If this argument is not given,
+                       "eventlet" is tried first, then "gevent", and finally
+                       "threading". The websocket transport is only supported
+                       in "eventlet" and "gevent_uwsgi" mode. In "gevent" mode,
+                       websockets are available if "geventwebsocket" is
+                       installed and the gevent-websocket server is used.
     :param ping_timeout: The time in seconds that the client waits for the
                          server to respond before disconnecting.
     :param ping_interval: The interval in seconds at which the client pings
