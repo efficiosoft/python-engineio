@@ -60,7 +60,8 @@ class TestServer(unittest.TestCase):
             'compression_threshold': 4,
             'cookie': 'foo',
             'cors_allowed_origins': ['foo', 'bar', 'baz'],
-            'cors_credentials': False}
+            'cors_credentials': False,
+            'async_handlers': False}
         s = server.Server(**kwargs)
         for arg in six.iterkeys(kwargs):
             self.assertEqual(getattr(s, arg), kwargs[arg])
@@ -99,6 +100,64 @@ class TestServer(unittest.TestCase):
         self.assertEqual(s.async['queue_class'], 'Queue')
         self.assertEqual(s.async['websocket'], async_eventlet)
         self.assertEqual(s.async['websocket_class'], 'WebSocketWSGI')
+
+    @mock.patch('importlib.import_module', side_effect=_mock_import)
+    def test_async_mode_gevent_uwsgi(self, import_module):
+        sys.modules['gevent'] = mock.MagicMock()
+        sys.modules['uwsgi'] = mock.MagicMock()
+        s = server.Server(async_mode='gevent_uwsgi')
+        self.assertEqual(s.async_mode, 'gevent_uwsgi')
+
+        from engineio import async_gevent_uwsgi
+
+        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
+        self.assertEqual(s.async['thread_class'], 'Thread')
+        self.assertEqual(s.async['queue'], 'gevent.queue')
+        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s.async['websocket'], async_gevent_uwsgi)
+        self.assertEqual(s.async['websocket_class'], 'uWSGIWebSocket')
+        del sys.modules['gevent']
+        del sys.modules['uwsgi']
+        del sys.modules['engineio.async_gevent_uwsgi']
+
+    @mock.patch('importlib.import_module', side_effect=_mock_import)
+    def test_async_mode_gevent_uwsgi_without_uwsgi(self, import_module):
+        sys.modules['gevent'] = mock.MagicMock()
+        sys.modules['uwsgi'] = None
+        s = server.Server(async_mode='gevent_uwsgi')
+        self.assertEqual(s.async_mode, 'gevent_uwsgi')
+
+        from engineio import async_gevent_uwsgi
+
+        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
+        self.assertEqual(s.async['thread_class'], 'Thread')
+        self.assertEqual(s.async['queue'], 'gevent.queue')
+        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s.async['websocket'], None)
+        self.assertEqual(s.async['websocket_class'], None)
+        del sys.modules['gevent']
+        del sys.modules['uwsgi']
+        del sys.modules['engineio.async_gevent_uwsgi']
+
+    @mock.patch('importlib.import_module', side_effect=_mock_import)
+    def test_async_mode_gevent_uwsgi_without_websocket(self, import_module):
+        sys.modules['gevent'] = mock.MagicMock()
+        sys.modules['uwsgi'] = mock.MagicMock()
+        del sys.modules['uwsgi'].websocket_handshake
+        s = server.Server(async_mode='gevent_uwsgi')
+        self.assertEqual(s.async_mode, 'gevent_uwsgi')
+
+        from engineio import async_gevent_uwsgi
+
+        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
+        self.assertEqual(s.async['thread_class'], 'Thread')
+        self.assertEqual(s.async['queue'], 'gevent.queue')
+        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s.async['websocket'], None)
+        self.assertEqual(s.async['websocket_class'], None)
+        del sys.modules['gevent']
+        del sys.modules['uwsgi']
+        del sys.modules['engineio.async_gevent_uwsgi']
 
     @mock.patch('importlib.import_module', side_effect=_mock_import)
     def test_async_mode_gevent(self, import_module):
@@ -149,11 +208,19 @@ class TestServer(unittest.TestCase):
 
     @mock.patch('importlib.import_module', side_effect=[ImportError,
                                                         _mock_async])
+    def test_async_mode_auto_gevent_uwsgi(self, import_module):
+        s = server.Server()
+        self.assertEqual(s.async_mode, 'gevent_uwsgi')
+
+    @mock.patch('importlib.import_module', side_effect=[ImportError,
+                                                        ImportError,
+                                                        _mock_async])
     def test_async_mode_auto_gevent(self, import_module):
         s = server.Server()
         self.assertEqual(s.async_mode, 'gevent')
 
     @mock.patch('importlib.import_module', side_effect=[ImportError,
+                                                        ImportError,
                                                         ImportError,
                                                         _mock_async])
     def test_async_mode_auto_threading(self, import_module):
@@ -452,6 +519,11 @@ class TestServer(unittest.TestCase):
         self.assertEqual(mock_socket.send.call_args[0][0].packet_type,
                          packet.MESSAGE)
         self.assertEqual(mock_socket.send.call_args[0][0].data, 'hello')
+
+    def test_send_unknown_socket(self):
+        s = server.Server()
+        # just ensure no exceptions are raised
+        s.send('foo', 'hello')
 
     def test_get_request(self):
         s = server.Server()

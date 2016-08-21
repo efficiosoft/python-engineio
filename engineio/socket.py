@@ -50,7 +50,7 @@ class Socket(object):
             self.send(packet.Packet(packet.PONG, pkt.data))
         elif pkt.packet_type == packet.MESSAGE:
             self.server._trigger_event('message', self.sid, pkt.data,
-                                       async=True)
+                                       async=self.server.async_handlers)
         elif pkt.packet_type == packet.UPGRADE:
             self.send(packet.Packet(packet.NOOP))
         else:
@@ -179,7 +179,8 @@ class Socket(object):
                 p = ws.wait()
             except:
                 break
-            if p is None:  # connection closed by client
+            if p is None:
+                # connection closed by client
                 break
             if isinstance(p, six.text_type):  # pragma: no cover
                 p = p.encode('utf-8')
@@ -192,4 +193,4 @@ class Socket(object):
         self.close(wait=True, abort=True)
         self.queue.put(None)  # unlock the writer task so that it can exit
 
-        return []  # response must be an iterable by wsgi specification
+        return []
