@@ -19,14 +19,10 @@ class Socket(object):
         self.upgraded = False
         self.closed = False
 
-    def poll(self, block=True):
-        """Wait for packets to send to the client.
-        If block is False, raise IOError immediately if queue is empty"""
+    def poll(self):
+        """Wait for packets to send to the client."""
         try:
-            if block:
-                packets = [self.queue.get(timeout=self.server.ping_timeout)]
-            else:
-                packets = [self.queue.get(block=False)]
+            packets = [self.queue.get(timeout=self.server.ping_timeout)]
             self.queue.task_done()
         except self.server.async['queue'].Empty:
             raise IOError()
