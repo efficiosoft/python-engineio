@@ -1,82 +1,67 @@
+import asyncio
 import time
 import six
 
 from . import exceptions
 from . import packet
 from . import payload
+from . import socket
 
 
-class Socket(object):
-    """An Engine.IO socket."""
-    upgrade_protocols = ['websocket']
-
-    def __init__(self, server, sid):
-        self.server = server
-        self.sid = sid
-        self.queue = self.create_queue()
-        self.last_ping = time.time()
-        self.connected = False
-        self.upgraded = False
-        self.closing = False
-        self.closed = False
-
+class AsyncSocket(socket.Socket):
     def create_queue(self):
-        return getattr(self.server._async['queue'],
-                       self.server._async['queue_class'])()
+        return asyncio.Queue()
 
-    def poll(self):
+    async def poll(self):
         """Wait for packets to send to the client."""
         try:
-            packets = [self.queue.get(timeout=self.server.ping_timeout)]
+            packets = [await asyncio.wait_for(self.queue.get(),
+                                              self.server.ping_timeout)]
             self.queue.task_done()
-        except self.server._async['queue'].Empty:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             raise exceptions.QueueEmpty()
         if packets == [None]:
             return []
         try:
-            packets.append(self.queue.get(block=False))
+            packets.append(self.queue.get_nowait())
             self.queue.task_done()
-        except self.server._async['queue'].Empty:
+        except asyncio.QueueEmpty:
             pass
         return packets
 
-    def receive(self, pkt):
+    async def receive(self, pkt):
         """Receive packet from the client."""
-        packet_name = packet.packet_names[pkt.packet_type] \
-            if pkt.packet_type < len(packet.packet_names) else 'UNKNOWN'
         self.server.logger.info('%s: Received packet %s data %s',
-                                self.sid, packet_name,
+                                self.sid, packet.packet_names[pkt.packet_type],
                                 pkt.data if not isinstance(pkt.data, bytes)
                                 else '<binary>')
         if pkt.packet_type == packet.PING:
             self.last_ping = time.time()
-            self.send(packet.Packet(packet.PONG, pkt.data))
+            await self.send(packet.Packet(packet.PONG, pkt.data))
         elif pkt.packet_type == packet.MESSAGE:
-            self.server._trigger_event('message', self.sid, pkt.data,
-                                       async=self.server.async_handlers)
+            await self.server._trigger_event('message', self.sid, pkt.data)
         elif pkt.packet_type == packet.UPGRADE:
-            self.send(packet.Packet(packet.NOOP))
+            await self.send(packet.Packet(packet.NOOP))
         elif pkt.packet_type == packet.CLOSE:
-            self.close(wait=False, abort=True)
+            await self.close(wait=False, abort=True)
         else:
             raise exceptions.UnknownPacketError()
 
-    def send(self, pkt):
+    async def send(self, pkt):
         """Send a packet to the client."""
         if self.closed:
             raise IOError('Socket is closed')
         if time.time() - self.last_ping > self.server.ping_timeout:
             self.server.logger.info('%s: Client is gone, closing socket',
                                     self.sid)
-            self.close(wait=False, abort=True)
-            return
-        self.queue.put(pkt)
+            return await self.close(wait=False, abort=True)
         self.server.logger.info('%s: Sending packet %s data %s',
                                 self.sid, packet.packet_names[pkt.packet_type],
                                 pkt.data if not isinstance(pkt.data, bytes)
                                 else '<binary>')
+        await self.queue.put(pkt)
 
-    def handle_get_request(self, environ, start_response):
+    async def handle_get_request(self, environ):
         """Handle a long-polling GET request from the client."""
         connections = [
             s.strip()
@@ -85,44 +70,43 @@ class Socket(object):
         if 'upgrade' in connections and transport in self.upgrade_protocols:
             self.server.logger.info('%s: Received request to upgrade to %s',
                                     self.sid, transport)
-            return getattr(self, '_upgrade_' + transport)(environ,
-                                                          start_response)
+            return await getattr(self, '_upgrade_' + transport)(environ)
         try:
-            packets = self.poll()
+            packets = await self.poll()
         except exceptions.QueueEmpty as e:
-            self.close(wait=False)
+            await self.close(wait=False)
             raise e
         return packets
 
-    def handle_post_request(self, environ):
+    async def handle_post_request(self, environ):
         """Handle a long-polling POST request from the client."""
         length = int(environ.get('CONTENT_LENGTH', '0'))
         if length > self.server.max_http_buffer_size:
             raise exceptions.ContentTooLongError()
         else:
-            body = environ['wsgi.input'].read(length)
+            body = await environ['wsgi.input'].read(length)
             p = payload.Payload(encoded_payload=body)
             for pkt in p.packets:
-                self.receive(pkt)
+                await self.receive(pkt)
 
-    def close(self, wait=True, abort=False):
+    async def close(self, wait=True, abort=False):
         """Close the socket connection."""
         if not self.closed and not self.closing:
             self.closing = True
             reraise_exc = None
             try:
-                self.server._trigger_event('disconnect', self.sid, async=False)
+                await self.server._trigger_event('disconnect', self.sid)
             except Exception as e:
                 reraise_exc = e
             if not abort:
-                self.send(packet.Packet(packet.CLOSE))
+                await self.send(packet.Packet(packet.CLOSE))
             self.closed = True
             if wait:
-                self.queue.join()
+                await self.queue.join()
             if reraise_exc:
                 raise reraise_exc
 
-    def _upgrade_websocket(self, environ, start_response):
+    async def _upgrade_websocket(self, environ):
         """Upgrade the connection from polling to websocket."""
         if self.upgraded:
             raise IOError('Socket has been upgraded already')
@@ -133,32 +117,27 @@ class Socket(object):
         websocket_class = getattr(self.server._async['websocket'],
                                   self.server._async['websocket_class'])
         ws = websocket_class(self._websocket_handler)
-        return ws(environ, start_response)
+        return await ws(environ)
 
-    def _websocket_handler(self, ws):
+    async def _websocket_handler(self, ws):
         """Engine.IO handler for websocket transport."""
-        # try to set a socket timeout matching the configured ping interval
-        for attr in ['_sock', 'socket']:  # pragma: no cover
-            if hasattr(ws, attr) and hasattr(getattr(ws, attr), 'settimeout'):
-                getattr(ws, attr).settimeout(self.server.ping_interval)
-
         if self.connected:
             # the socket was already connected, so this is an upgrade
-            self.queue.join()  # flush the queue first
+            await self.queue.join()  # flush the queue first
 
-            pkt = ws.wait()
+            pkt = await ws.wait()
             if pkt != packet.Packet(packet.PING,
                                     data=six.text_type('probe')).encode(
                                         always_bytes=False):
                 self.server.logger.info(
                     '%s: Failed websocket upgrade, no PING packet', self.sid)
-                return []
-            ws.send(packet.Packet(
+                return
+            await ws.send(packet.Packet(
                 packet.PONG,
                 data=six.text_type('probe')).encode(always_bytes=False))
-            self.send(packet.Packet(packet.NOOP))
+            await self.send(packet.Packet(packet.NOOP))
 
-            pkt = ws.wait()
+            pkt = await ws.wait()
             decoded_pkt = packet.Packet(encoded_packet=pkt)
             if decoded_pkt.packet_type != packet.UPGRADE:
                 self.upgraded = False
@@ -166,18 +145,18 @@ class Socket(object):
                     ('%s: Failed websocket upgrade, expected UPGRADE packet, '
                      'received %s instead.'),
                     self.sid, pkt)
-                return []
+                return
             self.upgraded = True
         else:
             self.connected = True
             self.upgraded = True
 
         # start separate writer thread
-        def writer():
+        async def writer():
             while True:
                 packets = None
                 try:
-                    packets = self.poll()
+                    packets = await self.poll()
                 except exceptions.QueueEmpty:
                     break
                 if not packets:
@@ -185,10 +164,10 @@ class Socket(object):
                     break
                 try:
                     for pkt in packets:
-                        ws.send(pkt.encode(always_bytes=False))
+                        await ws.send(pkt.encode(always_bytes=False))
                 except:
                     break
-        writer_task = self.server.start_background_task(writer)
+        writer_task = asyncio.ensure_future(writer())
 
         self.server.logger.info(
             '%s: Upgrade to websocket successful', self.sid)
@@ -197,14 +176,8 @@ class Socket(object):
         while True:
             p = None
             try:
-                p = ws.wait()
-            except Exception as e:
-                # if the socket is already closed, we can assume this is a
-                # downstream error of that
-                if not self.closed:  # pragma: no cover
-                    self.server.logger.info(
-                        '%s: Unexpected error "%s", closing connection',
-                        self.sid, str(e))
+                p = await asyncio.wait_for(ws.wait(), self.server.ping_timeout)
+            except:
                 break
             if p is None:
                 # connection closed by client
@@ -213,7 +186,7 @@ class Socket(object):
                 p = p.encode('utf-8')
             pkt = packet.Packet(encoded_packet=p)
             try:
-                self.receive(pkt)
+                await self.receive(pkt)
             except exceptions.UnknownPacketError:
                 pass
             except Exception as e:
@@ -223,10 +196,8 @@ class Socket(object):
                 reraise_exc = e
                 break
 
-        self.queue.put(None)  # unlock the writer task so that it can exit
-        writer_task.join()
-        self.close(wait=True, abort=True)
+        await self.queue.put(None)  # unlock the writer task so it can exit
+        await asyncio.wait_for(writer_task, timeout=None)
+        await self.close(wait=True, abort=True)
         if reraise_exc:
             raise reraise_exc
-
-        return []

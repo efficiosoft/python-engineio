@@ -3,11 +3,8 @@ import sys
 import six
 
 import gevent
-try:
-    import uwsgi
-    _websocket_available = hasattr(uwsgi, 'websocket_handshake')
-except ImportError:
-    _websocket_available = False
+import uwsgi
+_websocket_available = hasattr(uwsgi, 'websocket_handshake')
 
 
 class Thread(gevent.Greenlet):  # pragma: no cover
@@ -29,8 +26,10 @@ class uWSGIWebSocket(object):  # pragma: no cover
     """
     def __init__(self, app):
         self.app = app
+        self._sock = None
 
     def __call__(self, environ, start_response):
+        self._sock = uwsgi.connection_fd()
         self.environ = environ
 
         uwsgi.websocket_handshake()
@@ -52,13 +51,16 @@ class uWSGIWebSocket(object):  # pragma: no cover
                 """Sets event when data becomes available to read on fd."""
                 while True:
                     event.set()
-                    select([fd], [], [])[0]
+                    try:
+                        select([fd], [], [])[0]
+                    except ValueError:
+                        break
             self._select_greenlet = gevent.spawn(
                 select_greenlet_runner,
-                uwsgi.connection_fd(),
+                self._sock,
                 self._event)
 
-        return self.app(self)
+        self.app(self)
 
     def close(self):
         """Disconnects uWSGI from the client."""
@@ -142,7 +144,7 @@ class uWSGIWebSocket(object):  # pragma: no cover
                     return self._decode_received(msg)
 
 
-async = {
+_async = {
     'threading': sys.modules[__name__],
     'thread_class': 'Thread',
     'queue': importlib.import_module('gevent.queue'),

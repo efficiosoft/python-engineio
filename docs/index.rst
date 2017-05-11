@@ -6,20 +6,19 @@
 engineio documentation
 ======================
 
-:ref:`genindex` | :ref:`modindex` | :ref:`search`
-
 This project implements an Engine.IO server that can run standalone or
 integrated with a Python WSGI application. The following are some of its
 features:
 
 - Fully compatible with the Javascript
-  `engine.io-client <https://github.com/Automattic/engine.io-client>`_ library,
-  versions 1.5.0 and up.
+  `engine.io-client <https://github.com/Automattic/engine.io-client>`_ library..
 - Compatible with Python 2.7 and Python 3.3+.
-- Supports large number of clients even on modest hardware when used with
-  an asynchronous server based on `eventlet <http://eventlet.net/>`_ or
-  `gevent <http://gevent.org>`_. For development and testing, any WSGI
-  compliant multi-threaded server can be used.
+- Supports large number of clients even on modest hardware when used with an
+  asynchronous server based on `asyncio <https://docs.python.org/3/library/asyncio.html>`_
+  (`sanic <http://sanic.readthedocs.io/>`_ and `aiohttp <http://aiohttp.readthedocs.io/>`_),
+  `eventlet <http://eventlet.net/>`_ or `gevent <http://gevent.org>`_. For
+  development and testing, any WSGI compliant multi-threaded server can also be
+  used.
 - Includes a WSGI middleware that integrates Engine.IO traffic with standard
   WSGI applications.
 - Uses an event-based architecture implemented with decorators that hides the
@@ -87,6 +86,43 @@ HTML/Javascript to the client::
         # deploy as an eventlet WSGI server
         eventlet.wsgi.server(eventlet.listen(('', 8000)), app)
 
+Below is a similar application, coded for asyncio (Python 3.5+ only) with the
+aiohttp framework::
+
+    from aiohttp import web
+    import engineio
+
+    eio = engineio.AsyncServer()
+    app = web.Application()
+
+    # attach the Engine.IO server to the application
+    eio.attach(app)
+
+    async def index(request):
+        """Serve the client-side application."""
+        with open('index.html') as f:
+            return web.Response(text=f.read(), content_type='text/html')
+
+    @eio.on('connect')
+    def connect(sid, environ):
+        print("connect ", sid)
+
+    @eio.on('message')
+    async def message(sid, data):
+        print("message ", data)
+        await eio.send(sid, 'reply')
+
+    @eio.on('disconnect')
+    def disconnect(sid):
+        print('disconnect ', sid)
+
+    app.router.add_static('/static', 'static')
+    app.router.add_get('/', index)
+
+    if __name__ == '__main__':
+        # run the aiohttp application
+        web.run_app(app)
+
 The client-side application must include the
 `engine.io-client <https://github.com/Automattic/engine.io-client>`_ library
 (version 1.5.0 or newer recommended).
@@ -113,6 +149,59 @@ Deployment
 
 The following sections describe a variety of deployment strategies for
 Engine.IO servers.
+
+Sanic
+~~~~~
+
+`Sanic <http://sanic.readthedocs.io/>`_ is a very efficient asynchronous web
+server for Python 3.5 and newer.
+
+Instances of class ``engineio.AsyncServer`` will automatically use Sanic for
+asynchronous operations if the framework is installed. To request its use
+explicitly, the ``async_mode`` option can be given in the constructor::
+
+    eio = engineio.AsyncServer(async_mode='sanic')
+
+A server configured for aiohttp must be attached to an existing application::
+
+    app = web.Application()
+    eio.attach(app)
+
+The Sanic application can define regular routes that will coexist with the
+Engine.IO server. A typical pattern is to add routes that serve a client
+application and any associated static files.
+
+The Sanic application is then executed in the usual manner::
+
+    if __name__ == '__main__':
+        app.run()
+
+aiohttp
+~~~~~~~
+
+`aiohttp <http://aiohttp.readthedocs.io/>`_ provides a framework with support
+for HTTP and WebSocket, based on asyncio. Support for this framework is limited
+to Python 3.5 and newer.
+
+Instances of class ``engineio.AsyncServer`` will automatically use aiohttp
+for asynchronous operations if the library is installed. To request its use
+explicitly, the ``async_mode`` option can be given in the constructor::
+
+    eio = engineio.AsyncServer(async_mode='aiohttp')
+
+A server configured for aiohttp must be attached to an existing application::
+
+    app = web.Application()
+    eio.attach(app)
+
+The aiohttp application can define regular routes that will coexist with the
+Engine.IO server. A typical pattern is to add routes that serve a client
+application and any associated static files.
+
+The aiohttp application is then executed in the usual manner::
+
+    if __name__ == '__main__':
+        web.run_app(app)
 
 Eventlet
 ~~~~~~~~
@@ -217,18 +306,18 @@ can take advantage of uWSGI's native WebSocket support.
 
 Instances of class ``engineio.Server`` will automatically use this option for
 asynchronous operations if both gevent and uWSGI are installed and eventlet is
-not installed. uWSGI must be compiled with WebSocket and SSL support for the
-WebSocket transport to be available. To request this asynchoronous mode
-explicitly, the  ``async_mode`` option can be given in the constructor::
+not installed. To request this asynchoronous mode explicitly, the
+``async_mode`` option can be given in the constructor::
 
-    # gevent alone or with gevent-websocket
+    # gevent with uWSGI
     eio = engineio.Server(async_mode='gevent_uwsgi')
 
 A complete explanation of the configuration and usage of the uWSGI server is
 beyond the scope of this documentation. The uWSGI server is a fairly complex
-package that provides a large and comprehensive set of options. As way of an
-introduction, the following command starts a uWSGI server for the
-``latency.py`` example on port 5000::
+package that provides a large and comprehensive set of options. It must be
+compiled with WebSocket and SSL support for the WebSocket transport to be
+available. As way of an introduction, the following command starts a uWSGI
+server for the ``latency.py`` example on port 5000::
 
     $ uwsgi --http :5000 --gevent 1000 --http-websockets --master --wsgi-file latency.py --callable app
 
@@ -297,3 +386,7 @@ API Reference
 
 .. autoclass:: Server
    :members:
+
+.. autoclass:: AsyncServer
+   :members:
+   :inherited-members:

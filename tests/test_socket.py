@@ -7,6 +7,7 @@ if six.PY3:
 else:
     import mock
 
+from engineio import exceptions
 from engineio import packet
 from engineio import payload
 from engineio import socket
@@ -27,11 +28,11 @@ class TestSocket(unittest.TestCase):
         except ImportError:
             import Queue as queue
         import threading
-        mock_server.async = {'threading': threading,
-                             'thread_class': 'Thread',
-                             'queue': queue,
-                             'queue_class': 'Queue',
-                             'websocket': None}
+        mock_server._async = {'threading': threading,
+                              'thread_class': 'Thread',
+                              'queue': queue,
+                              'queue_class': 'Queue',
+                              'websocket': None}
 
         def bg_task(target, *args, **kwargs):
             th = threading.Thread(target=target, args=args, kwargs=kwargs)
@@ -61,7 +62,7 @@ class TestSocket(unittest.TestCase):
     def test_empty_poll(self):
         mock_server = self._get_mock_server()
         s = socket.Socket(mock_server, 'sid')
-        self.assertRaises(IOError, s.poll)
+        self.assertRaises(exceptions.QueueEmpty, s.poll)
 
     def test_poll(self):
         mock_server = self._get_mock_server()
@@ -98,7 +99,8 @@ class TestSocket(unittest.TestCase):
     def test_invalid_packet(self):
         mock_server = self._get_mock_server()
         s = socket.Socket(mock_server, 'sid')
-        self.assertRaises(ValueError, s.receive, packet.Packet(packet.OPEN))
+        self.assertRaises(exceptions.UnknownPacketError, s.receive,
+                          packet.Packet(packet.OPEN))
 
     def test_timeout(self):
         mock_server = self._get_mock_server()
@@ -126,7 +128,7 @@ class TestSocket(unittest.TestCase):
         s = socket.Socket(mock_server, 'foo')
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo'}
         start_response = mock.MagicMock()
-        self.assertRaises(IOError, s.handle_get_request, environ,
+        self.assertRaises(exceptions.QueueEmpty, s.handle_get_request, environ,
                           start_response)
 
     def test_polling_write(self):
@@ -152,7 +154,8 @@ class TestSocket(unittest.TestCase):
         s.receive = mock.MagicMock()
         environ = {'REQUEST_METHOD': 'POST', 'QUERY_STRING': 'sid=foo',
                    'CONTENT_LENGTH': len(p), 'wsgi.input': six.BytesIO(p)}
-        self.assertRaises(ValueError, s.handle_post_request, environ)
+        self.assertRaises(exceptions.ContentTooLongError,
+                          s.handle_post_request, environ)
 
     def test_upgrade_handshake(self):
         mock_server = self._get_mock_server()
@@ -167,23 +170,22 @@ class TestSocket(unittest.TestCase):
 
     def test_upgrade(self):
         mock_server = self._get_mock_server()
-        mock_server.async['websocket'] = mock.MagicMock()
-        mock_server.async['websocket_class'] = 'WebSocket'
+        mock_server._async['websocket'] = mock.MagicMock()
+        mock_server._async['websocket_class'] = 'WebSocket'
         mock_ws = mock.MagicMock()
-        mock_server.async['websocket'].WebSocket.configure_mock(
-            return_value=mock_ws)
+        mock_server._async['websocket'].WebSocket.return_value = mock_ws
         s = socket.Socket(mock_server, 'sid')
         s.connected = True
         environ = "foo"
         start_response = "bar"
         s._upgrade_websocket(environ, start_response)
-        mock_server.async['websocket'].WebSocket.assert_called_once_with(
+        mock_server._async['websocket'].WebSocket.assert_called_once_with(
             s._websocket_handler)
         mock_ws.assert_called_once_with(environ, start_response)
 
     def test_upgrade_twice(self):
         mock_server = self._get_mock_server()
-        mock_server.async['websocket'] = mock.MagicMock()
+        mock_server._async['websocket'] = mock.MagicMock()
         s = socket.Socket(mock_server, 'sid')
         s.connected = True
         s.upgraded = True
@@ -228,10 +230,24 @@ class TestSocket(unittest.TestCase):
         self.assertEqual(s.queue.get().packet_type, packet.NOOP)
         self.assertFalse(s.upgraded)
 
+    def test_close_packet(self):
+        mock_server = self._get_mock_server()
+        s = socket.Socket(mock_server, 'sid')
+        s.connected = True
+        s.close = mock.MagicMock()
+        s.receive(packet.Packet(packet.CLOSE))
+        s.close.assert_called_once_with(wait=False, abort=True)
+
+    def test_invalid_packet_type(self):
+        mock_server = self._get_mock_server()
+        s = socket.Socket(mock_server, 'sid')
+        pkt = packet.Packet(packet_type=99)
+        self.assertRaises(exceptions.UnknownPacketError, s.receive, pkt)
+
     def test_upgrade_not_supported(self):
         mock_server = self._get_mock_server()
-        mock_server.async['websocket'] = None
-        mock_server.async['websocket_class'] = None
+        mock_server._async['websocket'] = None
+        mock_server._async['websocket_class'] = None
         s = socket.Socket(mock_server, 'sid')
         s.connected = True
         environ = "foo"
@@ -247,7 +263,7 @@ class TestSocket(unittest.TestCase):
         foo = six.text_type('foo')
         bar = six.text_type('bar')
         s.poll = mock.MagicMock(side_effect=[
-            [packet.Packet(packet.MESSAGE, data=bar)], IOError])
+            [packet.Packet(packet.MESSAGE, data=bar)], exceptions.QueueEmpty])
         ws = mock.MagicMock()
         ws.wait.side_effect = [
             packet.Packet(packet.MESSAGE, data=foo).encode(
@@ -272,7 +288,7 @@ class TestSocket(unittest.TestCase):
         bar = six.text_type('bar')
         probe = six.text_type('probe')
         s.poll = mock.MagicMock(side_effect=[
-            [packet.Packet(packet.MESSAGE, data=bar)], IOError])
+            [packet.Packet(packet.MESSAGE, data=bar)], exceptions.QueueEmpty])
         ws = mock.MagicMock()
         ws.wait.side_effect = [
             packet.Packet(packet.PING, data=probe).encode(
@@ -306,7 +322,7 @@ class TestSocket(unittest.TestCase):
         self._join_bg_tasks()
         self.assertTrue(s.upgraded)
 
-    def test_websocket_read_write_fail(self):
+    def test_websocket_read_write_wait_fail(self):
         mock_server = self._get_mock_server()
         s = socket.Socket(mock_server, 'sid')
         s.connected = False
@@ -315,7 +331,7 @@ class TestSocket(unittest.TestCase):
         bar = six.text_type('bar')
         s.poll = mock.MagicMock(side_effect=[
             [packet.Packet(packet.MESSAGE, data=bar)],
-            [packet.Packet(packet.MESSAGE, data=bar)], IOError])
+            [packet.Packet(packet.MESSAGE, data=bar)], exceptions.QueueEmpty])
         ws = mock.MagicMock()
         ws.wait.side_effect = [
             packet.Packet(packet.MESSAGE, data=foo).encode(
@@ -323,6 +339,29 @@ class TestSocket(unittest.TestCase):
             RuntimeError]
         ws.send.side_effect = [None, RuntimeError]
         s._websocket_handler(ws)
+        self._join_bg_tasks()
+        self.assertEqual(s.closed, True)
+
+    def test_websocket_read_write_receive_fail(self):
+        mock_server = self._get_mock_server()
+        s = socket.Socket(mock_server, 'sid')
+        s.connected = False
+        s.queue.join = mock.MagicMock(return_value=None)
+        foo = six.text_type('foo')
+        bar = six.text_type('bar')
+        s.poll = mock.MagicMock(side_effect=[
+            [packet.Packet(packet.MESSAGE, data=bar)],
+            [packet.Packet(packet.MESSAGE, data=bar)], exceptions.QueueEmpty])
+        ws = mock.MagicMock()
+        ws.wait.side_effect = [
+            packet.Packet(packet.MESSAGE, data=foo).encode(
+                always_bytes=False),
+            packet.Packet(packet.MESSAGE, data=bar).encode(
+                always_bytes=False)]
+        ws.send.side_effect = [None, None]
+        s.receive = mock.MagicMock(side_effect=[
+            None, ZeroDivisionError])
+        self.assertRaises(ZeroDivisionError, s._websocket_handler, ws)
         self._join_bg_tasks()
         self.assertEqual(s.closed, True)
 
@@ -334,7 +373,7 @@ class TestSocket(unittest.TestCase):
         foo = six.text_type('foo')
         bar = six.text_type('bar')
         s.poll = mock.MagicMock(side_effect=[
-            [packet.Packet(packet.MESSAGE, data=bar)], IOError])
+            [packet.Packet(packet.MESSAGE, data=bar)], exceptions.QueueEmpty])
         ws = mock.MagicMock()
         ws.wait.side_effect = [
             packet.Packet(packet.OPEN).encode(always_bytes=False),
@@ -356,6 +395,17 @@ class TestSocket(unittest.TestCase):
         s.close(wait=False)
         self.assertRaises(IOError, s.send, packet.Packet(packet.NOOP))
 
+    def test_close_after_close(self):
+        mock_server = self._get_mock_server()
+        s = socket.Socket(mock_server, 'sid')
+        s.close(wait=False)
+        self.assertTrue(s.closed)
+        self.assertEqual(mock_server._trigger_event.call_count, 1)
+        mock_server._trigger_event.assert_called_once_with('disconnect', 'sid',
+                                                           async=False)
+        s.close()
+        self.assertEqual(mock_server._trigger_event.call_count, 1)
+
     def test_close_and_wait(self):
         mock_server = self._get_mock_server()
         s = socket.Socket(mock_server, 'sid')
@@ -369,3 +419,13 @@ class TestSocket(unittest.TestCase):
         s.queue = mock.MagicMock()
         s.close(wait=False)
         self.assertEqual(s.queue.join.call_count, 0)
+
+    def test_close_disconnect_error(self):
+        mock_server = self._get_mock_server()
+        mock_server._trigger_event.side_effect = ZeroDivisionError
+        s = socket.Socket(mock_server, 'sid')
+        self.assertRaises(ZeroDivisionError, s.close, wait=False)
+        self.assertTrue(s.closed)
+        self.assertEqual(mock_server._trigger_event.call_count, 1)
+        mock_server._trigger_event.assert_called_once_with('disconnect', 'sid',
+                                                           async=False)

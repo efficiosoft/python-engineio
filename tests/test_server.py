@@ -13,6 +13,7 @@ if six.PY3:
 else:
     import mock
 
+from engineio import exceptions
 from engineio import packet
 from engineio import payload
 from engineio import server
@@ -21,25 +22,27 @@ from engineio import server
 original_import_module = importlib.import_module
 
 
-def _mock_import(module, pkg=None):
+def _mock_import(module, *args, **kwargs):
     if module.startswith('engineio.'):
-        return original_import_module(module, pkg)
+        return original_import_module(module, *args, **kwargs)
     return module
 
 
 class TestServer(unittest.TestCase):
     _mock_async = mock.MagicMock()
-    _mock_async.async = {
+    _mock_async._async = {
         'threading': 't',
         'thread_class': 'tc',
         'queue': 'q',
         'queue_class': 'qc',
         'websocket': 'w',
-        'websocket_class': 'wc'}
+        'websocket_class': 'wc'
+    }
 
     def _get_mock_socket(self):
         mock_socket = mock.MagicMock()
         mock_socket.closed = False
+        mock_socket.closing = False
         mock_socket.upgraded = False
         return mock_socket
 
@@ -49,6 +52,15 @@ class TestServer(unittest.TestCase):
     def tearDown(self):
         # restore JSON encoder, in case a test changed it
         packet.Packet.json = json
+
+    def test_is_asyncio_based(self):
+        s = server.Server()
+        self.assertEqual(s.is_asyncio_based(), False)
+
+    def test_async_modes(self):
+        s = server.Server()
+        self.assertEqual(s.async_modes(), ['eventlet', 'gevent_uwsgi',
+                                           'gevent', 'threading'])
 
     def test_create(self):
         kwargs = {
@@ -79,12 +91,12 @@ class TestServer(unittest.TestCase):
         except ImportError:
             import Queue as queue
 
-        self.assertEqual(s.async['threading'], threading)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], queue)
-        self.assertEqual(s.async['queue_class'], 'Queue')
-        self.assertEqual(s.async['websocket'], None)
-        self.assertEqual(s.async['websocket_class'], None)
+        self.assertEqual(s._async['threading'], threading)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], queue)
+        self.assertEqual(s._async['queue_class'], 'Queue')
+        self.assertEqual(s._async['websocket'], None)
+        self.assertEqual(s._async['websocket_class'], None)
 
     def test_async_mode_eventlet(self):
         s = server.Server(async_mode='eventlet')
@@ -94,12 +106,12 @@ class TestServer(unittest.TestCase):
         from eventlet import queue
         from engineio import async_eventlet
 
-        self.assertEqual(s.async['threading'], threading)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], queue)
-        self.assertEqual(s.async['queue_class'], 'Queue')
-        self.assertEqual(s.async['websocket'], async_eventlet)
-        self.assertEqual(s.async['websocket_class'], 'WebSocketWSGI')
+        self.assertEqual(s._async['threading'], threading)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], queue)
+        self.assertEqual(s._async['queue_class'], 'Queue')
+        self.assertEqual(s._async['websocket'], async_eventlet)
+        self.assertEqual(s._async['websocket_class'], 'WebSocketWSGI')
 
     @mock.patch('importlib.import_module', side_effect=_mock_import)
     def test_async_mode_gevent_uwsgi(self, import_module):
@@ -110,12 +122,12 @@ class TestServer(unittest.TestCase):
 
         from engineio import async_gevent_uwsgi
 
-        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], 'gevent.queue')
-        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
-        self.assertEqual(s.async['websocket'], async_gevent_uwsgi)
-        self.assertEqual(s.async['websocket_class'], 'uWSGIWebSocket')
+        self.assertEqual(s._async['threading'], async_gevent_uwsgi)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], 'gevent.queue')
+        self.assertEqual(s._async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s._async['websocket'], async_gevent_uwsgi)
+        self.assertEqual(s._async['websocket_class'], 'uWSGIWebSocket')
         del sys.modules['gevent']
         del sys.modules['uwsgi']
         del sys.modules['engineio.async_gevent_uwsgi']
@@ -124,20 +136,10 @@ class TestServer(unittest.TestCase):
     def test_async_mode_gevent_uwsgi_without_uwsgi(self, import_module):
         sys.modules['gevent'] = mock.MagicMock()
         sys.modules['uwsgi'] = None
-        s = server.Server(async_mode='gevent_uwsgi')
-        self.assertEqual(s.async_mode, 'gevent_uwsgi')
-
-        from engineio import async_gevent_uwsgi
-
-        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], 'gevent.queue')
-        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
-        self.assertEqual(s.async['websocket'], None)
-        self.assertEqual(s.async['websocket_class'], None)
+        self.assertRaises(ValueError, server.Server,
+                          async_mode='gevent_uwsgi')
         del sys.modules['gevent']
         del sys.modules['uwsgi']
-        del sys.modules['engineio.async_gevent_uwsgi']
 
     @mock.patch('importlib.import_module', side_effect=_mock_import)
     def test_async_mode_gevent_uwsgi_without_websocket(self, import_module):
@@ -149,12 +151,12 @@ class TestServer(unittest.TestCase):
 
         from engineio import async_gevent_uwsgi
 
-        self.assertEqual(s.async['threading'], async_gevent_uwsgi)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], 'gevent.queue')
-        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
-        self.assertEqual(s.async['websocket'], None)
-        self.assertEqual(s.async['websocket_class'], None)
+        self.assertEqual(s._async['threading'], async_gevent_uwsgi)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], 'gevent.queue')
+        self.assertEqual(s._async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s._async['websocket'], None)
+        self.assertEqual(s._async['websocket_class'], None)
         del sys.modules['gevent']
         del sys.modules['uwsgi']
         del sys.modules['engineio.async_gevent_uwsgi']
@@ -168,12 +170,12 @@ class TestServer(unittest.TestCase):
 
         from engineio import async_gevent
 
-        self.assertEqual(s.async['threading'], async_gevent)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], 'gevent.queue')
-        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
-        self.assertEqual(s.async['websocket'], async_gevent)
-        self.assertEqual(s.async['websocket_class'], 'WebSocketWSGI')
+        self.assertEqual(s._async['threading'], async_gevent)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], 'gevent.queue')
+        self.assertEqual(s._async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s._async['websocket'], async_gevent)
+        self.assertEqual(s._async['websocket_class'], 'WebSocketWSGI')
         del sys.modules['gevent']
         del sys.modules['geventwebsocket']
         del sys.modules['engineio.async_gevent']
@@ -187,15 +189,21 @@ class TestServer(unittest.TestCase):
 
         from engineio import async_gevent
 
-        self.assertEqual(s.async['threading'], async_gevent)
-        self.assertEqual(s.async['thread_class'], 'Thread')
-        self.assertEqual(s.async['queue'], 'gevent.queue')
-        self.assertEqual(s.async['queue_class'], 'JoinableQueue')
-        self.assertEqual(s.async['websocket'], None)
-        self.assertEqual(s.async['websocket_class'], None)
+        self.assertEqual(s._async['threading'], async_gevent)
+        self.assertEqual(s._async['thread_class'], 'Thread')
+        self.assertEqual(s._async['queue'], 'gevent.queue')
+        self.assertEqual(s._async['queue_class'], 'JoinableQueue')
+        self.assertEqual(s._async['websocket'], None)
+        self.assertEqual(s._async['websocket_class'], None)
         del sys.modules['gevent']
         del sys.modules['geventwebsocket']
         del sys.modules['engineio.async_gevent']
+
+    @unittest.skipIf(sys.version_info < (3, 5), 'only for Python 3.5+')
+    @mock.patch('importlib.import_module', side_effect=_mock_import)
+    def test_async_mode_aiohttp(self, import_module):
+        sys.modules['aiohttp'] = mock.MagicMock()
+        self.assertRaises(ValueError, server.Server, async_mode='aiohttp')
 
     @mock.patch('importlib.import_module', side_effect=[ImportError])
     def test_async_mode_invalid(self, import_module):
@@ -335,6 +343,8 @@ class TestServer(unittest.TestCase):
         self.assertEqual(len(s.sockets), 1)
         self.assertEqual(start_response.call_count, 1)
         self.assertEqual(start_response.call_args[0][0], '200 OK')
+        self.assertIn(('Content-Type', 'application/octet-stream'),
+                      start_response.call_args[0][1])
         self.assertEqual(len(r), 1)
         packets = payload.Payload(encoded_payload=r[0]).packets
         self.assertEqual(len(packets), 1)
@@ -358,6 +368,8 @@ class TestServer(unittest.TestCase):
         start_response = mock.MagicMock()
         s.handle_request(environ, start_response)
         self.assertTrue(start_response.call_args[0][0], '200 OK')
+        self.assertIn(('Content-Type', 'text/plain; charset=UTF-8'),
+                      start_response.call_args[0][1])
         s.send('1', b'\x00\x01\x02', binary=True)
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=1&b64=1'}
         r = s.handle_request(environ, start_response)
@@ -370,6 +382,8 @@ class TestServer(unittest.TestCase):
         start_response = mock.MagicMock()
         s.handle_request(environ, start_response)
         self.assertTrue(start_response.call_args[0][0], '200 OK')
+        self.assertIn(('Content-Type', 'text/plain; charset=UTF-8'),
+                      start_response.call_args[0][1])
         s.send('1', b'\x00\x01\x02', binary=True)
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=1&b64=true'}
         r = s.handle_request(environ, start_response)
@@ -382,6 +396,8 @@ class TestServer(unittest.TestCase):
         start_response = mock.MagicMock()
         s.handle_request(environ, start_response)
         self.assertTrue(start_response.call_args[0][0], '200 OK')
+        self.assertIn(('Content-Type', 'application/octet-stream'),
+                      start_response.call_args[0][1])
         s.send('1', b'\x00\x01\x02', binary=True)
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=1&b64=0'}
         r = s.handle_request(environ, start_response)
@@ -394,6 +410,8 @@ class TestServer(unittest.TestCase):
         start_response = mock.MagicMock()
         s.handle_request(environ, start_response)
         self.assertTrue(start_response.call_args[0][0], '200 OK')
+        self.assertIn(('Content-Type', 'application/octet-stream'),
+                      start_response.call_args[0][1])
         s.send('1', b'\x00\x01\x02', binary=True)
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=1&b64=false'}
         r = s.handle_request(environ, start_response)
@@ -416,9 +434,27 @@ class TestServer(unittest.TestCase):
         environ = {'REQUEST_METHOD': 'GET',
                    'QUERY_STRING': 'transport=websocket'}
         start_response = mock.MagicMock()
+        # force socket to stay open, so that we can check it later
+        Socket().closed = False
         s.handle_request(environ, start_response)
         self.assertEqual(s.sockets['123'].send.call_args[0][0].packet_type,
                          packet.OPEN)
+
+    @mock.patch('engineio.socket.Socket',
+                return_value=mock.MagicMock(connected=False, closed=False))
+    def test_connect_transport_websocket_closed(self, Socket):
+        s = server.Server()
+        s._generate_id = mock.MagicMock(return_value='123')
+        environ = {'REQUEST_METHOD': 'GET',
+                   'QUERY_STRING': 'transport=websocket'}
+        start_response = mock.MagicMock()
+
+        def mock_handle(environ, start_response):
+            s.sockets['123'].closed = True
+
+        Socket().handle_get_request = mock_handle
+        s.handle_request(environ, start_response)
+        self.assertNotIn('123', s.sockets)
 
     def test_connect_transport_invalid(self):
         s = server.Server()
@@ -485,6 +521,17 @@ class TestServer(unittest.TestCase):
         s.handle_request(environ, start_response)
         self.assertEqual(len(s.sockets), 0)
         self.assertEqual(start_response.call_args[0][0], '401 UNAUTHORIZED')
+
+    def test_connect_event_error(self):
+        s = server.Server()
+        s._generate_id = mock.MagicMock(return_value='123')
+        mock_event = mock.MagicMock(side_effect=ZeroDivisionError)
+        s.on('connect')(mock_event)
+        environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': ''}
+        start_response = mock.MagicMock()
+        self.assertRaises(ZeroDivisionError, s.handle_request, environ,
+                          start_response)
+        self.assertEqual(len(s.sockets), 0)
 
     def test_method_not_found(self):
         s = server.Server()
@@ -568,7 +615,8 @@ class TestServer(unittest.TestCase):
     def test_get_request_error(self):
         s = server.Server()
         mock_socket = self._get_mock_socket()
-        mock_socket.handle_get_request = mock.MagicMock(side_effect=[IOError])
+        mock_socket.handle_get_request = mock.MagicMock(
+            side_effect=[exceptions.QueueEmpty])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo'}
         start_response = mock.MagicMock()
@@ -592,13 +640,26 @@ class TestServer(unittest.TestCase):
         s = server.Server()
         mock_socket = self._get_mock_socket()
         mock_socket.handle_post_request = mock.MagicMock(
-            side_effect=[ValueError])
+            side_effect=[exceptions.EngineIOError])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'POST', 'QUERY_STRING': 'sid=foo'}
         start_response = mock.MagicMock()
         s.handle_request(environ, start_response)
         self.assertEqual(start_response.call_args[0][0],
                          '400 BAD REQUEST')
+        self.assertNotIn('foo', s.sockets)
+
+    def test_post_request_application_error(self):
+        s = server.Server()
+        mock_socket = self._get_mock_socket()
+        mock_socket.handle_post_request = mock.MagicMock(
+            side_effect=[ZeroDivisionError])
+        s.sockets['foo'] = mock_socket
+        environ = {'REQUEST_METHOD': 'POST', 'QUERY_STRING': 'sid=foo'}
+        start_response = mock.MagicMock()
+        self.assertRaises(ZeroDivisionError, s.handle_request, environ,
+                          start_response)
+        self.assertNotIn('foo', s.sockets)
 
     @staticmethod
     def _gzip_decompress(b):
@@ -613,7 +674,7 @@ class TestServer(unittest.TestCase):
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': 'gzip,deflate'}
+                   'HTTP_ACCEPT_ENCODING': 'gzip,deflate'}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         self.assertIn(('Content-Encoding', 'gzip'),
@@ -627,7 +688,7 @@ class TestServer(unittest.TestCase):
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': 'deflate;q=1,gzip'}
+                   'HTTP_ACCEPT_ENCODING': 'deflate;q=1,gzip'}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         self.assertIn(('Content-Encoding', 'deflate'),
@@ -641,7 +702,7 @@ class TestServer(unittest.TestCase):
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': 'gzip'}
+                   'HTTP_ACCEPT_ENCODING': 'gzip'}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         for header, value in start_response.call_args[0][1]:
@@ -655,7 +716,7 @@ class TestServer(unittest.TestCase):
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': 'gzip'}
+                   'HTTP_ACCEPT_ENCODING': 'gzip'}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         for header, value in start_response.call_args[0][1]:
@@ -663,13 +724,13 @@ class TestServer(unittest.TestCase):
         self.assertRaises(IOError, self._gzip_decompress, r[0])
 
     def test_compression_unknown(self):
-        s = server.Server(http_compression=False, compression_threshold=0)
+        s = server.Server(compression_threshold=0)
         mock_socket = self._get_mock_socket()
         mock_socket.handle_get_request = mock.MagicMock(return_value=[
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': 'rar'}
+                   'HTTP_ACCEPT_ENCODING': 'rar'}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         for header, value in start_response.call_args[0][1]:
@@ -683,7 +744,7 @@ class TestServer(unittest.TestCase):
             packet.Packet(packet.MESSAGE, data='hello')])
         s.sockets['foo'] = mock_socket
         environ = {'REQUEST_METHOD': 'GET', 'QUERY_STRING': 'sid=foo',
-                   'ACCEPT_ENCODING': ''}
+                   'HTTP_ACCEPT_ENCODING': ''}
         start_response = mock.MagicMock()
         r = s.handle_request(environ, start_response)
         for header, value in start_response.call_args[0][1]:

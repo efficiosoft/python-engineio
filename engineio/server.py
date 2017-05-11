@@ -7,9 +7,12 @@ import zlib
 import six
 from six.moves import urllib
 
+from .exceptions import EngineIOError
 from . import packet
 from . import payload
 from . import socket
+
+default_logger = logging.getLogger('engineio')
 
 
 class Server(object):
@@ -18,14 +21,14 @@ class Server(object):
     This class implements a fully compliant Engine.IO web server with support
     for websocket and long-polling transports.
 
-    :param async_mode: The library used for asynchronous operations. Valid
-                       options are "threading", "eventlet", "gevent" and
-                       "gevent_uwsgi". If this argument is not given,
-                       "eventlet" is tried first, then "gevent", and finally
-                       "threading". The websocket transport is only supported
-                       in "eventlet" and "gevent_uwsgi" mode. In "gevent" mode,
-                       websockets are available if "geventwebsocket" is
-                       installed and the gevent-websocket server is used.
+    :param async_mode: The asynchronous model to use. See the Deployment
+                       section in the documentation for a description of the
+                       available options. Valid async modes are "threading",
+                       "eventlet", "gevent" and "gevent_uwsgi". If this
+                       argument is not given, "eventlet" is tried first, then
+                       "gevent_uwsgi", then "gevent", and finally "threading".
+                       The first async mode that has all its dependencies
+                       installed is then one that is chosen.
     :param ping_timeout: The time in seconds that the client waits for the
                          server to respond before disconnecting.
     :param ping_interval: The interval in seconds at which the client pings
@@ -82,7 +85,7 @@ class Server(object):
         if not isinstance(logger, bool):
             self.logger = logger
         else:
-            self.logger = logging.getLogger('engineio')
+            self.logger = default_logger
             if not logging.root.handlers and \
                     self.logger.level == logging.NOTSET:
                 if logger:
@@ -91,22 +94,41 @@ class Server(object):
                     self.logger.setLevel(logging.ERROR)
                 self.logger.addHandler(logging.StreamHandler())
         if async_mode is None:
-            modes = ['eventlet', 'gevent_uwsgi', 'gevent', 'threading']
+            modes = self.async_modes()
         else:
             modes = [async_mode]
-        self.async = None
+        self._async = None
         self.async_mode = None
         for mode in modes:
             try:
-                self.async = importlib.import_module(
-                    'engineio.async_' + mode).async
+                self._async = importlib.import_module(
+                    'engineio.async_' + mode)._async
+                asyncio_based = self._async['asyncio'] \
+                    if 'asyncio' in self._async else False
+                if asyncio_based != self.is_asyncio_based():
+                    continue
                 self.async_mode = mode
                 break
             except ImportError:
                 pass
         if self.async_mode is None:
             raise ValueError('Invalid async_mode specified')
+        if self.is_asyncio_based() and \
+                ('asyncio' not in self._async or
+                 not self._async['asyncio']):  # pragma: no cover
+            raise ValueError('The selected async_mode is not asyncio '
+                             'compatible')
+        if not self.is_asyncio_based() and 'asyncio' in self._async and \
+                self._async['asyncio']:  # pragma: no cover
+            raise ValueError('The selected async_mode requires asyncio and '
+                             'must use the AsyncServer class')
         self.logger.info('Server initialized for %s.', self.async_mode)
+
+    def is_asyncio_based(self):
+        return False
+
+    def async_modes(self):
+        return ['eventlet', 'gevent_uwsgi', 'gevent', 'threading']
 
     def on(self, event, handler=None):
         """Register an event handler.
@@ -241,9 +263,9 @@ class Server(object):
                                 r = self._ok(packets, b64=b64)
                             else:
                                 r = packets
-                        except IOError:
+                        except EngineIOError:
                             if sid in self.sockets:  # pragma: no cover
-                                del self.sockets[sid]
+                                self.disconnect(sid)
                             r = self._bad_request()
                         if sid in self.sockets and self.sockets[sid].closed:
                             del self.sockets[sid]
@@ -256,17 +278,25 @@ class Server(object):
                     try:
                         socket.handle_post_request(environ)
                         r = self._ok()
-                    except ValueError:
+                    except EngineIOError:
+                        if sid in self.sockets:  # pragma: no cover
+                            self.disconnect(sid)
                         r = self._bad_request()
+                    except Exception as e:
+                        # for any other unexpected errors, we disconnect
+                        # the cient and reraise
+                        if sid in self.sockets:  # pragma: no cover
+                            self.disconnect(sid)
+                        raise e
             else:
                 self.logger.warning('Method %s not supported', method)
                 r = self._method_not_found()
         if not isinstance(r, dict):
-            return r
+            return r or []
         if self.http_compression and \
                 len(r['response']) >= self.compression_threshold:
             encodings = [e.split(';')[0].strip() for e in
-                         environ.get('ACCEPT_ENCODING', '').split(',')]
+                         environ.get('HTTP_ACCEPT_ENCODING', '').split(',')]
             for encoding in encodings:
                 if encoding in self.compression_methods:
                     r['response'] = \
@@ -292,9 +322,9 @@ class Server(object):
         the Python standard library. The `start()` method on this object is
         already called by this function.
         """
-        th = getattr(self.async['threading'],
-                     self.async['thread_class'])(target=target, args=args,
-                                                 kwargs=kwargs)
+        th = getattr(self._async['threading'],
+                     self._async['thread_class'])(target=target, args=args,
+                                                  kwargs=kwargs)
         th.start()
         return th  # pragma: no cover
 
@@ -306,7 +336,7 @@ class Server(object):
         sleep without having to worry about using the correct call for the
         selected async mode.
         """
-        return self.async['sleep'](seconds)
+        return self._async['sleep'](seconds)
 
     def _generate_id(self):
         """Generate a unique session id."""
@@ -325,13 +355,27 @@ class Server(object):
                           'pingInterval': int(self.ping_interval * 1000)})
         s.send(pkt)
 
-        if self._trigger_event('connect', sid, environ, async=False) is False:
-            self.logger.warning('Application rejected connection')
+        reraise_exc = None
+        try:
+            ret = self._trigger_event('connect', sid, environ, async=False)
+        except Exception as e:
+            ret = False
+            reraise_exc = e
+        if ret is False:
             del self.sockets[sid]
+            if reraise_exc is None:
+                self.logger.warning('Application rejected connection')
+            else:
+                self.logger.error('Connect handler raised an exception')
+                raise reraise_exc
             return self._unauthorized()
 
         if transport == 'websocket':
-            return s.handle_get_request(environ, start_response)
+            ret = s.handle_get_request(environ, start_response)
+            if s.closed:
+                # websocket connection ended, so we are done
+                del self.sockets[sid]
+            return ret
         else:
             s.connected = True
             headers = None
@@ -342,7 +386,7 @@ class Server(object):
     def _upgrades(self, sid, transport):
         """Return the list of possible upgrades for a client connection."""
         if not self.allow_upgrades or self._get_socket(sid).upgraded or \
-                self.async['websocket_class'] is None or \
+                self._async['websocket_class'] is None or \
                 transport == 'websocket':
             return []
         return ['websocket']
@@ -372,7 +416,10 @@ class Server(object):
         if packets is not None:
             if headers is None:
                 headers = []
-            headers += [('Content-Type', 'application/octet-stream')]
+            if b64:
+                headers += [('Content-Type', 'text/plain; charset=UTF-8')]
+            else:
+                headers += [('Content-Type', 'application/octet-stream')]
             return {'status': '200 OK',
                     'headers': headers,
                     'response': payload.Payload(packets=packets).encode(b64)}
